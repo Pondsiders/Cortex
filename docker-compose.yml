@@ -1,0 +1,38 @@
+# Cortex - Semantic memory service
+#
+# Requires these environment variables (from settings.json via env.sh):
+#   DATABASE_URL - Postgres connection string
+#   OLLAMA_URL - Ollama endpoint (e.g., http://primer:11434)
+#   CORTEX_API_KEY - API key for authentication
+#   LOGFIRE_TOKEN - Logfire observability token
+#   TAILSCALE_DNS - MagicDNS resolver (100.100.100.100)
+#
+# Usage:
+#   eval $(Basement/Env/env.sh)
+#   docker compose up -d
+
+services:
+  cortex:
+    build:
+      context: ./cortex
+      dockerfile: Dockerfile
+    container_name: cortex
+    restart: unless-stopped
+    ports:
+      - "7867:7867"
+    dns:
+      - ${TAILSCALE_DNS:-100.100.100.100}
+      - 1.1.1.1  # Fallback for non-Tailscale hostnames
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - OLLAMA_URL=${OLLAMA_URL}
+      - CORTEX_API_KEY=${CORTEX_API_KEY}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN}
+      - LOGFIRE_IGNORE_NO_CONFIG=1
+      - REDIS_URL=${REDIS_URL}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7867/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
