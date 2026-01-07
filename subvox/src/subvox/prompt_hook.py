@@ -48,7 +48,7 @@ def main():
                 # Output to stdout - this gets added to context
                 print(f"""
 <subvox>
-Use Cortex. Suggested memories to store:
+Alpha, memorable things have happened. Use Cortex **now** to store a memory.
 {memorables_str}
 </subvox>
 """)
