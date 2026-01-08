@@ -1,7 +1,7 @@
 """Ollama embeddings client."""
 
 import httpx
-import logfire
+from lmnr import observe
 
 
 class EmbeddingError(Exception):
@@ -26,34 +26,34 @@ class EmbeddingClient:
         """Generate embedding for a query (for search)."""
         return await self._embed(f"search_query: {query}")
 
+    @observe(name="ollama_embed")
     async def _embed(self, prompt: str) -> list[float]:
         """Call Ollama API to generate embedding."""
-        with logfire.span("ollama_embed", model=self.model):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(
-                        f"{self.ollama_url}/api/embeddings",
-                        json={
-                            "model": self.model,
-                            "prompt": prompt,
-                            "keep_alive": -1,  # Keep model loaded indefinitely
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    return data["embedding"]
-            except httpx.TimeoutException:
-                logfire.error("Ollama timeout after {timeout}s", timeout=self.timeout)
-                raise EmbeddingError("Embedding service timed out")
-            except httpx.HTTPStatusError as e:
-                logfire.error("Ollama HTTP error: {status}", status=e.response.status_code)
-                raise EmbeddingError(f"Embedding service error: {e.response.status_code}")
-            except httpx.ConnectError:
-                logfire.error("Ollama unreachable at {url}", url=self.ollama_url)
-                raise EmbeddingError("Embedding service unreachable")
-            except Exception as e:
-                logfire.error("Ollama unexpected error: {error}", error=str(e))
-                raise EmbeddingError(f"Embedding failed: {e}")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.ollama_url}/api/embeddings",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "keep_alive": -1,  # Keep model loaded indefinitely
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["embedding"]
+        except httpx.TimeoutException:
+            print(f"[Cortex] Ollama timeout after {self.timeout}s")
+            raise EmbeddingError("Embedding service timed out")
+        except httpx.HTTPStatusError as e:
+            print(f"[Cortex] Ollama HTTP error: {e.response.status_code}")
+            raise EmbeddingError(f"Embedding service error: {e.response.status_code}")
+        except httpx.ConnectError:
+            print(f"[Cortex] Ollama unreachable at {self.ollama_url}")
+            raise EmbeddingError("Embedding service unreachable")
+        except Exception as e:
+            print(f"[Cortex] Ollama unexpected error: {e}")
+            raise EmbeddingError(f"Embedding failed: {e}")
 
     async def health_check(self) -> bool:
         """Check if Ollama is reachable."""

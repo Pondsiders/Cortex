@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     api_key: str = Field(alias="CORTEX_API_KEY")
     host: str = Field(default="0.0.0.0", alias="CORTEX_HOST")
     port: int = Field(default=7867, alias="CORTEX_PORT")
-    logfire_token: str = Field(alias="LOGFIRE_TOKEN")
+    lmnr_project_api_key: str | None = Field(default=None, alias="LMNR_PROJECT_API_KEY")
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
 
     class Config:

@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 import httpx
-import logfire
 import redis
 
 from .config import (
@@ -29,15 +28,6 @@ from .config import (
     STM_MESSAGES_KEY,
     STM_TTL,
 )
-
-# Configure logfire and instrument httpx
-# Disable scrubbing - we need to see the actual prompts for debugging
-logfire.configure(
-    service_name="subvox-stop",
-    send_to_logfire="if-token-present",
-    scrubbing=False,
-)
-logfire.instrument_httpx()
 
 
 def load_prompt_template() -> str:
@@ -81,7 +71,7 @@ def parse_transcript_backwards(transcript_path: str) -> dict | None:
     """
     path = Path(transcript_path)
     if not path.exists():
-        logfire.warning("Transcript file not found", path=transcript_path)
+        print(f"[Subvox] Transcript file not found: {transcript_path}", file=sys.stderr)
         return None
 
     # Read all lines
@@ -122,7 +112,7 @@ def parse_transcript_backwards(transcript_path: str) -> dict | None:
             break
 
     if user_message is None:
-        logfire.info("No user message found in transcript")
+        print("[Subvox] No user message found in transcript", file=sys.stderr)
         return None
 
     # Now collect assistant messages AFTER this user message
@@ -194,123 +184,107 @@ def ask_olmo(conversation: str, existing_memorables: str, prompt_template: str) 
 </memory-candidates>
 """
 
-    with logfire.span("olmo-generate", prompt_length=len(prompt)):
-        # Log the full prompt for debugging
-        logfire.info("OLMo prompt", prompt=prompt)
+    # Call Ollama API
+    response = httpx.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_ctx": OLLAMA_CONTEXT},
+        },
+        timeout=120.0,  # 2 minute timeout for cold starts
+    )
+    response.raise_for_status()
+    data = response.json()
 
-        # Call Ollama API directly via httpx (instrumented by logfire)
-        response = httpx.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_ctx": OLLAMA_CONTEXT},
-            },
-            timeout=120.0,  # 2 minute timeout for cold starts
-        )
-        response.raise_for_status()
-        data = response.json()
+    result = data.get("response", "").strip()
 
-        result = data.get("response", "").strip()
-
-        logfire.info(
-            "OLMo response",
-            response=result,
-            eval_count=data.get("eval_count"),
-            prompt_eval_count=data.get("prompt_eval_count"),
-            total_duration_ms=data.get("total_duration", 0) / 1_000_000,
-        )
+    print(
+        f"[Subvox] OLMo: eval_count={data.get('eval_count')}, "
+        f"prompt_eval_count={data.get('prompt_eval_count')}, "
+        f"duration_ms={data.get('total_duration', 0) / 1_000_000:.0f}",
+        file=sys.stderr
+    )
 
     return result
 
 
 def main():
     """Main entry point for the stop hook."""
-    with logfire.span("subvox-stop-hook"):
-        # Read input from stdin
-        try:
-            input_data = json.load(sys.stdin)
-        except json.JSONDecodeError as e:
-            logfire.error("Invalid JSON input", error=str(e))
-            print(f"Subvox: Invalid JSON input: {e}", file=sys.stderr)
-            return
+    # Read input from stdin
+    try:
+        input_data = json.load(sys.stdin)
+    except json.JSONDecodeError as e:
+        print(f"[Subvox] Invalid JSON input: {e}", file=sys.stderr)
+        return
 
-        transcript_path = input_data.get("transcript_path")
-        if not transcript_path:
-            logfire.error("No transcript_path in input")
-            print("Subvox: No transcript_path provided", file=sys.stderr)
-            return
+    transcript_path = input_data.get("transcript_path")
+    if not transcript_path:
+        print("[Subvox] No transcript_path provided", file=sys.stderr)
+        return
 
-        # Parse transcript to get the last exchange
-        exchange = parse_transcript_backwards(transcript_path)
-        if not exchange:
-            logfire.info("No exchange found, exiting cleanly")
-            return
+    # Parse transcript to get the last exchange
+    exchange = parse_transcript_backwards(transcript_path)
+    if not exchange:
+        return
 
-        logfire.info(
-            "Extracted exchange",
-            user_message_length=len(exchange["user_message"]),
-            assistant_message_count=len(exchange["assistant_messages"]),
-        )
+    print(
+        f"[Subvox] Exchange: user={len(exchange['user_message'])} chars, "
+        f"assistant={len(exchange['assistant_messages'])} msgs",
+        file=sys.stderr
+    )
 
-        # Connect to Redis
-        try:
-            r = redis.from_url(REDIS_URL)
-        except redis.RedisError as e:
-            logfire.error("Redis connection failed", error=str(e))
-            print(f"Subvox: Redis connection failed: {e}", file=sys.stderr)
-            return
+    # Connect to Redis
+    try:
+        r = redis.from_url(REDIS_URL)
+    except redis.RedisError as e:
+        print(f"[Subvox] Redis connection failed: {e}", file=sys.stderr)
+        return
 
-        # Build conversation from STM + current exchange
-        conversation = build_conversation_from_stm(r, exchange)
+    # Build conversation from STM + current exchange
+    conversation = build_conversation_from_stm(r, exchange)
 
-        # Get existing memorables
-        existing_memorables = ""
-        memorables_bytes = r.get(STM_MEMORABLES_KEY)
-        if memorables_bytes:
-            existing_memorables = memorables_bytes.decode("utf-8") if isinstance(memorables_bytes, bytes) else memorables_bytes
+    # Get existing memorables
+    existing_memorables = ""
+    memorables_bytes = r.get(STM_MEMORABLES_KEY)
+    if memorables_bytes:
+        existing_memorables = memorables_bytes.decode("utf-8") if isinstance(memorables_bytes, bytes) else memorables_bytes
 
-        # Load prompt template
-        try:
-            prompt_template = load_prompt_template()
-        except FileNotFoundError:
-            logfire.error("Prompt template not found", path=str(PROMPT_FILE))
-            print(f"Subvox: Prompt template not found: {PROMPT_FILE}", file=sys.stderr)
-            return
+    # Load prompt template
+    try:
+        prompt_template = load_prompt_template()
+    except FileNotFoundError:
+        print(f"[Subvox] Prompt template not found: {PROMPT_FILE}", file=sys.stderr)
+        return
 
-        # Ask OLMo
-        try:
-            new_memorables = ask_olmo(conversation, existing_memorables, prompt_template)
-        except Exception as e:
-            logfire.error("OLMo call failed", error=str(e))
-            print(f"Subvox: OLMo call failed: {e}", file=sys.stderr)
-            return
+    # Ask OLMo
+    try:
+        new_memorables = ask_olmo(conversation, existing_memorables, prompt_template)
+    except Exception as e:
+        print(f"[Subvox] OLMo call failed: {e}", file=sys.stderr)
+        return
 
-        # Parse memorables from OLMo's response
-        parsed_memorables = parse_memorables(new_memorables)
+    # Parse memorables from OLMo's response
+    parsed_memorables = parse_memorables(new_memorables)
 
-        logfire.info(
-            "OLMo returned memorables",
-            response_length=len(new_memorables),
-            parsed_count=len(parsed_memorables),
-        )
+    print(
+        f"[Subvox] Parsed {len(parsed_memorables)} memorables from response",
+        file=sys.stderr
+    )
 
-        if parsed_memorables:
-            # Found memorable content! Clear the buffer and store memorables.
-            r.delete(STM_MESSAGES_KEY)
-            r.set(STM_MEMORABLES_KEY, new_memorables, ex=STM_TTL)
-            logfire.info(
-                "Memorables found - buffer cleared",
-                memorable_count=len(parsed_memorables),
-            )
-        else:
-            # Nothing memorable yet - add exchange to buffer, keep accumulating
-            r.lpush(STM_MESSAGES_KEY, json.dumps(exchange))
-            r.expire(STM_MESSAGES_KEY, STM_TTL)
-            # Clear old memorables since we're still accumulating
-            r.delete(STM_MEMORABLES_KEY)
-            logfire.info("No memorables - exchange added to buffer")
+    if parsed_memorables:
+        # Found memorable content! Clear the buffer and store memorables.
+        r.delete(STM_MESSAGES_KEY)
+        r.set(STM_MEMORABLES_KEY, new_memorables, ex=STM_TTL)
+        print(f"[Subvox] Memorables stored, buffer cleared", file=sys.stderr)
+    else:
+        # Nothing memorable yet - add exchange to buffer, keep accumulating
+        r.lpush(STM_MESSAGES_KEY, json.dumps(exchange))
+        r.expire(STM_MESSAGES_KEY, STM_TTL)
+        # Clear old memorables since we're still accumulating
+        r.delete(STM_MEMORABLES_KEY)
+        print("[Subvox] No memorables - exchange added to buffer", file=sys.stderr)
 
 
 if __name__ == "__main__":

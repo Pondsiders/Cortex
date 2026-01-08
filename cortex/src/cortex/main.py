@@ -3,10 +3,12 @@
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-import logfire
 import redis
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, status
+from lmnr import Laminar, observe
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
 
 from .db import Database
 from .embeddings import EmbeddingClient, EmbeddingError
@@ -45,10 +47,17 @@ async def lifespan(app: FastAPI):
     # Load settings
     settings = Settings()
 
-    # Configure Logfire
-    logfire.configure(token=settings.logfire_token, service_name="cortex")
-    logfire.instrument_asyncpg()
-    logfire.instrument_httpx()
+    # Configure Laminar (sets global OTel tracer provider)
+    if settings.lmnr_project_api_key:
+        Laminar.initialize(
+            project_api_key=settings.lmnr_project_api_key,
+            base_url="http://primer:8000",
+            http_port=8000,
+            force_http=True,
+        )
+        # Instrument libraries (they use Laminar's OTel provider)
+        HTTPXClientInstrumentor().instrument()
+        AsyncPGInstrumentor().instrument()
 
     # Initialize database
     db = Database(settings.database_url)
@@ -62,12 +71,12 @@ async def lifespan(app: FastAPI):
         try:
             redis_client = redis.from_url(settings.redis_url)
             redis_client.ping()  # Test connection
-            logfire.info("Redis connected for Subvox STM")
+            print("[Cortex] Redis connected for Subvox STM")
         except redis.RedisError as e:
-            logfire.warning("Redis connection failed, STM clearing disabled", error=str(e))
+            print(f"[Cortex] Redis connection failed, STM clearing disabled: {e}")
             redis_client = None
 
-    logfire.info("Cortex started", port=settings.port)
+    print(f"[Cortex] Started on port {settings.port}")
 
     yield
 
@@ -75,7 +84,7 @@ async def lifespan(app: FastAPI):
     await db.disconnect()
     if redis_client:
         redis_client.close()
-    logfire.info("Cortex stopped")
+    print("[Cortex] Stopped")
 
 
 app = FastAPI(
@@ -84,9 +93,6 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-
-# Instrument FastAPI with Logfire
-logfire.instrument_fastapi(app)
 
 
 async def verify_api_key(x_api_key: str = Header()):
@@ -99,97 +105,97 @@ async def verify_api_key(x_api_key: str = Header()):
 
 
 @app.post("/store", response_model=StoreResponse, status_code=status.HTTP_201_CREATED)
+@observe(name="store_memory")
 async def store_memory(request: StoreRequest, _: None = Depends(verify_api_key)):
     """Store a new memory."""
-    with logfire.span("store_memory"):
+    try:
+        embedding = await embeddings.embed_document(request.content)
+    except EmbeddingError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        )
+
+    memory_id, created_at = await db.store_memory(
+        content=request.content,
+        embedding=embedding,
+        tags=request.tags,
+        timezone_str=request.timezone,
+    )
+
+    # Clear Subvox STM on successful store
+    if redis_client:
         try:
-            embedding = await embeddings.embed_document(request.content)
+            deleted = redis_client.delete(STM_MESSAGES_KEY, STM_MEMORABLES_KEY)
+            print(f"[Cortex] Subvox STM cleared, keys_deleted={deleted}")
+        except redis.RedisError as e:
+            print(f"[Cortex] Failed to clear Subvox STM: {e}")
+
+    return StoreResponse(id=memory_id, created_at=created_at)
+
+
+@app.post("/search", response_model=SearchResponse)
+@observe(name="search_memories")
+async def search_memories(request: SearchRequest, _: None = Depends(verify_api_key)):
+    """Search memories using hybrid (full-text + semantic) search."""
+    query_embedding = None
+    if not request.exact:
+        try:
+            query_embedding = await embeddings.embed_query(request.query)
         except EmbeddingError as e:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=str(e),
             )
 
-        memory_id, created_at = await db.store_memory(
-            content=request.content,
-            embedding=embedding,
-            tags=request.tags,
-            timezone_str=request.timezone,
+    results = await db.search_memories(
+        query_embedding=query_embedding,
+        query_text=request.query,
+        limit=request.limit,
+        include_forgotten=request.include_forgotten,
+        exact=request.exact,
+        after=request.after,
+        before=request.before,
+    )
+
+    memories = [
+        MemoryResult(
+            id=r["id"],
+            content=r["content"],
+            created_at=datetime.fromisoformat(r["metadata"]["created_at"]),
+            tags=r["metadata"].get("tags"),
+            score=r.get("score"),
         )
+        for r in results
+    ]
 
-        # Clear Subvox STM on successful store
-        if redis_client:
-            try:
-                deleted = redis_client.delete(STM_MESSAGES_KEY, STM_MEMORABLES_KEY)
-                logfire.info("Subvox STM cleared", keys_deleted=deleted)
-            except redis.RedisError as e:
-                logfire.warning("Failed to clear Subvox STM", error=str(e))
-
-        return StoreResponse(id=memory_id, created_at=created_at)
-
-
-@app.post("/search", response_model=SearchResponse)
-async def search_memories(request: SearchRequest, _: None = Depends(verify_api_key)):
-    """Search memories using hybrid (full-text + semantic) search."""
-    with logfire.span("search_memories", exact=request.exact):
-        query_embedding = None
-        if not request.exact:
-            try:
-                query_embedding = await embeddings.embed_query(request.query)
-            except EmbeddingError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=str(e),
-                )
-
-        results = await db.search_memories(
-            query_embedding=query_embedding,
-            query_text=request.query,
-            limit=request.limit,
-            include_forgotten=request.include_forgotten,
-            exact=request.exact,
-            after=request.after,
-            before=request.before,
-        )
-
-        memories = [
-            MemoryResult(
-                id=r["id"],
-                content=r["content"],
-                created_at=datetime.fromisoformat(r["metadata"]["created_at"]),
-                tags=r["metadata"].get("tags"),
-                score=r.get("score"),
-            )
-            for r in results
-        ]
-
-        return SearchResponse(memories=memories)
+    return SearchResponse(memories=memories)
 
 
 @app.get("/recent", response_model=RecentResponse)
+@observe(name="get_recent")
 async def get_recent(
     limit: int = 10,
     hours: int = 24,
     _: None = Depends(verify_api_key),
 ):
     """Get recent memories."""
-    with logfire.span("get_recent", limit=limit, hours=hours):
-        if limit > 100:
-            limit = 100
+    if limit > 100:
+        limit = 100
 
-        results = await db.get_recent_memories(limit=limit, hours=hours)
+    results = await db.get_recent_memories(limit=limit, hours=hours)
 
-        memories = [
-            MemoryResult(
-                id=r["id"],
-                content=r["content"],
-                created_at=datetime.fromisoformat(r["metadata"]["created_at"]),
-                tags=r["metadata"].get("tags"),
-            )
-            for r in results
-        ]
+    memories = [
+        MemoryResult(
+            id=r["id"],
+            content=r["content"],
+            created_at=datetime.fromisoformat(r["metadata"]["created_at"]),
+            tags=r["metadata"].get("tags"),
+        )
+        for r in results
+    ]
 
-        return RecentResponse(memories=memories)
+    return RecentResponse(memories=memories)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -215,30 +221,30 @@ async def health_check():
 
 
 @app.post("/vectors", response_model=VectorsResponse)
+@observe(name="get_vectors")
 async def get_vectors(request: VectorsRequest, _: None = Depends(verify_api_key)):
     """Get memories with their embeddings (for visualizer)."""
-    with logfire.span("get_vectors", limit=request.limit):
-        results = await db.get_vectors(limit=request.limit)
+    results = await db.get_vectors(limit=request.limit)
 
-        memories = [
-            MemoryWithVector(
-                id=r["id"],
-                content=r["content"],
-                created_at=datetime.fromisoformat(r["metadata"]["created_at"]),
-                embedding=r["embedding"],
-            )
-            for r in results
-        ]
+    memories = [
+        MemoryWithVector(
+            id=r["id"],
+            content=r["content"],
+            created_at=datetime.fromisoformat(r["metadata"]["created_at"]),
+            embedding=r["embedding"],
+        )
+        for r in results
+    ]
 
-        return VectorsResponse(memories=memories)
+    return VectorsResponse(memories=memories)
 
 
 @app.post("/forget", response_model=ForgetResponse)
+@observe(name="forget_memory")
 async def forget_memory(request: ForgetRequest, _: None = Depends(verify_api_key)):
     """Soft-delete a memory."""
-    with logfire.span("forget_memory", memory_id=request.id):
-        forgotten = await db.forget_memory(request.id)
-        return ForgetResponse(forgotten=forgotten)
+    forgotten = await db.forget_memory(request.id)
+    return ForgetResponse(forgotten=forgotten)
 
 
 def run():
