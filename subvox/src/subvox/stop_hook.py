@@ -11,6 +11,7 @@ This is the heart of Subvox. When Alpha stops talking:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -43,6 +44,31 @@ def load_prompt_template() -> str:
     """Load the OLMo prompt template."""
     with open(PROMPT_FILE) as f:
         return f.read()
+
+
+def parse_memorables(response: str) -> list[str]:
+    """Extract memorables from OLMo's response.
+
+    Returns a list of memorable items, or empty list if none found.
+    """
+    match = re.search(r'<memorables>(.*?)</memorables>', response, re.DOTALL)
+    if not match:
+        return []
+
+    content = match.group(1).strip()
+    if not content or content.lower() in ('', 'none', 'nothing notable', 'nothing notable.'):
+        return []
+
+    # Parse bullet points
+    memorables = []
+    for line in content.split('\n'):
+        line = line.strip()
+        if line.startswith('- ') or line.startswith('* '):
+            memorables.append(line[2:].strip())
+        elif line and not line.startswith('<'):
+            memorables.append(line)
+
+    return [m for m in memorables if m]
 
 
 def parse_transcript_backwards(transcript_path: str) -> dict | None:
@@ -261,16 +287,30 @@ def main():
             print(f"Subvox: OLMo call failed: {e}", file=sys.stderr)
             return
 
-        logfire.info("OLMo returned memorables", length=len(new_memorables))
+        # Parse memorables from OLMo's response
+        parsed_memorables = parse_memorables(new_memorables)
 
-        # Store exchange to STM messages
-        r.lpush(STM_MESSAGES_KEY, json.dumps(exchange))
-        r.expire(STM_MESSAGES_KEY, STM_TTL)
+        logfire.info(
+            "OLMo returned memorables",
+            response_length=len(new_memorables),
+            parsed_count=len(parsed_memorables),
+        )
 
-        # Store memorables
-        r.set(STM_MEMORABLES_KEY, new_memorables, ex=STM_TTL)
-
-        logfire.info("STM updated successfully")
+        if parsed_memorables:
+            # Found memorable content! Clear the buffer and store memorables.
+            r.delete(STM_MESSAGES_KEY)
+            r.set(STM_MEMORABLES_KEY, new_memorables, ex=STM_TTL)
+            logfire.info(
+                "Memorables found - buffer cleared",
+                memorable_count=len(parsed_memorables),
+            )
+        else:
+            # Nothing memorable yet - add exchange to buffer, keep accumulating
+            r.lpush(STM_MESSAGES_KEY, json.dumps(exchange))
+            r.expire(STM_MESSAGES_KEY, STM_TTL)
+            # Clear old memorables since we're still accumulating
+            r.delete(STM_MEMORABLES_KEY)
+            logfire.info("No memorables - exchange added to buffer")
 
 
 if __name__ == "__main__":
