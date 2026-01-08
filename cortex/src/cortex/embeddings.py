@@ -1,7 +1,6 @@
 """Ollama embeddings client."""
 
 import httpx
-from lmnr import observe
 
 
 class EmbeddingError(Exception):
@@ -26,7 +25,6 @@ class EmbeddingClient:
         """Generate embedding for a query (for search)."""
         return await self._embed(f"search_query: {query}")
 
-    @observe(name="ollama_embed")
     async def _embed(self, prompt: str) -> list[float]:
         """Call Ollama API to generate embedding."""
         try:

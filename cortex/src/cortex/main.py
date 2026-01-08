@@ -6,9 +6,6 @@ from datetime import datetime
 import redis
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from lmnr import Laminar, observe
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
 
 from .db import Database
 from .embeddings import EmbeddingClient, EmbeddingError
@@ -39,6 +36,34 @@ embeddings: EmbeddingClient | None = None
 redis_client: redis.Redis | None = None
 
 
+def configure_otel(endpoint: str, service_name: str):
+    """Configure OpenTelemetry with OTLP exporter."""
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+    from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+
+    # Create resource with service name
+    resource = Resource(attributes={SERVICE_NAME: service_name})
+
+    # Create and set tracer provider
+    provider = TracerProvider(resource=resource)
+    processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
+    provider.add_span_processor(processor)
+    trace.set_tracer_provider(provider)
+
+    # Instrument libraries
+    FastAPIInstrumentor.instrument()
+    HTTPXClientInstrumentor().instrument()
+    AsyncPGInstrumentor().instrument()
+
+    print(f"[Cortex] OTel configured -> {endpoint}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
@@ -47,17 +72,9 @@ async def lifespan(app: FastAPI):
     # Load settings
     settings = Settings()
 
-    # Configure Laminar (sets global OTel tracer provider)
-    if settings.lmnr_project_api_key:
-        Laminar.initialize(
-            project_api_key=settings.lmnr_project_api_key,
-            base_url="http://primer:8000",
-            http_port=8000,
-            force_http=True,
-        )
-        # Instrument libraries (they use Laminar's OTel provider)
-        HTTPXClientInstrumentor().instrument()
-        AsyncPGInstrumentor().instrument()
+    # Configure OTel if endpoint provided
+    if settings.otel_endpoint:
+        configure_otel(settings.otel_endpoint, settings.otel_service_name)
 
     # Initialize database
     db = Database(settings.database_url)
@@ -105,7 +122,6 @@ async def verify_api_key(x_api_key: str = Header()):
 
 
 @app.post("/store", response_model=StoreResponse, status_code=status.HTTP_201_CREATED)
-@observe(name="store_memory")
 async def store_memory(request: StoreRequest, _: None = Depends(verify_api_key)):
     """Store a new memory."""
     try:
@@ -135,7 +151,6 @@ async def store_memory(request: StoreRequest, _: None = Depends(verify_api_key))
 
 
 @app.post("/search", response_model=SearchResponse)
-@observe(name="search_memories")
 async def search_memories(request: SearchRequest, _: None = Depends(verify_api_key)):
     """Search memories using hybrid (full-text + semantic) search."""
     query_embedding = None
@@ -173,7 +188,6 @@ async def search_memories(request: SearchRequest, _: None = Depends(verify_api_k
 
 
 @app.get("/recent", response_model=RecentResponse)
-@observe(name="get_recent")
 async def get_recent(
     limit: int = 10,
     hours: int = 24,
@@ -221,7 +235,6 @@ async def health_check():
 
 
 @app.post("/vectors", response_model=VectorsResponse)
-@observe(name="get_vectors")
 async def get_vectors(request: VectorsRequest, _: None = Depends(verify_api_key)):
     """Get memories with their embeddings (for visualizer)."""
     results = await db.get_vectors(limit=request.limit)
@@ -240,7 +253,6 @@ async def get_vectors(request: VectorsRequest, _: None = Depends(verify_api_key)
 
 
 @app.post("/forget", response_model=ForgetResponse)
-@observe(name="forget_memory")
 async def forget_memory(request: ForgetRequest, _: None = Depends(verify_api_key)):
     """Soft-delete a memory."""
     forgotten = await db.forget_memory(request.id)

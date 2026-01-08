@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
-from lmnr import observe
 
 
 class Database:
@@ -44,7 +43,6 @@ class Database:
             print(f"[Cortex] Database health check failed: {e}")
             return False, None
 
-    @observe(name="db_store_memory")
     async def store_memory(
         self,
         content: str,
@@ -74,7 +72,6 @@ class Database:
             )
             return memory_id, created_at
 
-    @observe(name="db_search_memories")
     async def search_memories(
         self,
         query_embedding: list[float] | None,
@@ -169,7 +166,6 @@ class Database:
                 for row in rows
             ]
 
-    @observe(name="db_recent_memories")
     async def get_recent_memories(
         self,
         limit: int = 10,
@@ -202,7 +198,6 @@ class Database:
                 for row in rows
             ]
 
-    @observe(name="db_get_vectors")
     async def get_vectors(self, limit: int = 12000) -> list[dict[str, Any]]:
         """Get memories with their embeddings (for visualizer)."""
         async with self.pool.acquire() as conn:
@@ -228,7 +223,6 @@ class Database:
                 for row in rows
             ]
 
-    @observe(name="db_forget_memory")
     async def forget_memory(self, memory_id: int) -> bool:
         """Soft-delete a memory. Returns True if found and updated."""
         async with self.pool.acquire() as conn:

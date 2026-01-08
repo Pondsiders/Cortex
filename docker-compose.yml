@@ -4,7 +4,7 @@
 #   DATABASE_URL - Postgres connection string
 #   OLLAMA_URL - Ollama endpoint (e.g., http://primer:11434)
 #   CORTEX_API_KEY - API key for authentication
-#   LMNR_PROJECT_API_KEY - Laminar observability key (optional)
+#   OTEL_EXPORTER_OTLP_ENDPOINT - OTel collector endpoint (optional, e.g., http://primer:4317)
 #   TAILSCALE_DNS - MagicDNS resolver (100.100.100.100)
 #
 # Usage:
@@ -27,7 +27,8 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - OLLAMA_URL=${OLLAMA_URL}
       - CORTEX_API_KEY=${CORTEX_API_KEY}
-      - LMNR_PROJECT_API_KEY=${LMNR_PROJECT_API_KEY}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_SERVICE_NAME=cortex
       - REDIS_URL=${REDIS_URL}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7867/health')"]
