@@ -14,8 +14,6 @@ class Settings(BaseSettings):
     api_key: str = Field(alias="CORTEX_API_KEY")
     host: str = Field(default="0.0.0.0", alias="CORTEX_HOST")
     port: int = Field(default=7867, alias="CORTEX_PORT")
-    otel_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
-    otel_service_name: str = Field(default="cortex", alias="OTEL_SERVICE_NAME")
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
 
     class Config:

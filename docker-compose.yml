@@ -28,7 +28,8 @@ services:
       - OLLAMA_URL=${OLLAMA_URL}
       - CORTEX_API_KEY=${CORTEX_API_KEY}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      - OTEL_SERVICE_NAME=cortex
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=cortex
       - REDIS_URL=${REDIS_URL}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7867/health')"]

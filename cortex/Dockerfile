@@ -10,9 +10,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml .
 COPY src/ src/
 
-# Install dependencies
-RUN uv pip install --system .
+# Install dependencies and bootstrap OTel instrumentation
+RUN uv pip install --system . && \
+    opentelemetry-bootstrap --action=install
 
-# Run the server
+# Run the server with OTel instrumentation
+# Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_RESOURCE_ATTRIBUTES env vars to enable tracing
 EXPOSE 7867
-CMD ["uvicorn", "cortex.main:app", "--host", "0.0.0.0", "--port", "7867"]
+CMD ["opentelemetry-instrument", "uvicorn", "cortex.main:app", "--host", "0.0.0.0", "--port", "7867"]

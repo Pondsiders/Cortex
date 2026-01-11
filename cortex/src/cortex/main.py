@@ -1,4 +1,8 @@
-"""Cortex - Semantic memory service."""
+"""Cortex - Semantic memory service.
+
+OTel instrumentation is handled by opentelemetry-instrument wrapper at runtime.
+Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_RESOURCE_ATTRIBUTES env vars to enable.
+"""
 
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -36,34 +40,6 @@ embeddings: EmbeddingClient | None = None
 redis_client: redis.Redis | None = None
 
 
-def configure_otel(endpoint: str, service_name: str):
-    """Configure OpenTelemetry with OTLP exporter."""
-    from opentelemetry import trace
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import Resource, SERVICE_NAME
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-    from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
-
-    # Create resource with service name
-    resource = Resource(attributes={SERVICE_NAME: service_name})
-
-    # Create and set tracer provider
-    provider = TracerProvider(resource=resource)
-    processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
-    provider.add_span_processor(processor)
-    trace.set_tracer_provider(provider)
-
-    # Instrument libraries
-    FastAPIInstrumentor.instrument()
-    HTTPXClientInstrumentor().instrument()
-    AsyncPGInstrumentor().instrument()
-
-    print(f"[Cortex] OTel configured -> {endpoint}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
@@ -71,10 +47,6 @@ async def lifespan(app: FastAPI):
 
     # Load settings
     settings = Settings()
-
-    # Configure OTel if endpoint provided
-    if settings.otel_endpoint:
-        configure_otel(settings.otel_endpoint, settings.otel_service_name)
 
     # Initialize database
     db = Database(settings.database_url)
