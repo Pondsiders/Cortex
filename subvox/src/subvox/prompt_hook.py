@@ -9,6 +9,10 @@ import sys
 
 import redis
 
+# Initialize OTel before other imports that might be instrumented
+from .otel import init_otel
+init_otel()
+
 from .config import REDIS_URL, STM_MEMORABLES_KEY
 
 

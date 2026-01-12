@@ -38,7 +38,7 @@ Required (no fallbacks):
 ## Installation
 
 ```bash
-cd /Volumes/Pondside/Basement/Cortex/subvox
+cd /Pondside/Basement/Cortex/subvox
 uv pip install -e .
 ```
 

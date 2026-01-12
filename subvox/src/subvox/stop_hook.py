@@ -18,6 +18,10 @@ from pathlib import Path
 import httpx
 import redis
 
+# Initialize OTel before other imports that might be instrumented
+from .otel import init_otel
+init_otel()
+
 from .config import (
     OLLAMA_CONTEXT,
     OLLAMA_MODEL,
@@ -28,6 +32,7 @@ from .config import (
     STM_MESSAGES_KEY,
     STM_TTL,
 )
+from .otel import finish_llm_span, llm_span
 
 
 def load_prompt_template() -> str:
@@ -184,21 +189,30 @@ def ask_olmo(conversation: str, existing_memorables: str, prompt_template: str) 
 </memory-candidates>
 """
 
-    # Call Ollama API
-    response = httpx.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"num_ctx": OLLAMA_CONTEXT},
-        },
-        timeout=120.0,  # 2 minute timeout for cold starts
-    )
-    response.raise_for_status()
-    data = response.json()
+    # Call Ollama API with LLM span for observability
+    with llm_span(OLLAMA_MODEL, prompt, operation="memorables") as span:
+        response = httpx.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_ctx": OLLAMA_CONTEXT},
+            },
+            timeout=120.0,  # 2 minute timeout for cold starts
+        )
+        response.raise_for_status()
+        data = response.json()
 
-    result = data.get("response", "").strip()
+        result = data.get("response", "").strip()
+
+        # Add response attributes to span
+        finish_llm_span(
+            span,
+            response=result,
+            eval_count=data.get("eval_count"),
+            prompt_eval_count=data.get("prompt_eval_count"),
+        )
 
     print(
         f"[Subvox] OLMo: eval_count={data.get('eval_count')}, "
