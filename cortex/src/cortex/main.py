@@ -235,6 +235,23 @@ async def forget_memory(request: ForgetRequest, _: None = Depends(verify_api_key
     return ForgetResponse(forgotten=forgotten)
 
 
+@app.get("/get/{memory_id}", response_model=MemoryResult)
+async def get_memory_by_id(memory_id: int, _: None = Depends(verify_api_key)):
+    """Get a single memory by ID."""
+    result = await db.get_memory(memory_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Memory {memory_id} not found",
+        )
+    return MemoryResult(
+        id=result["id"],
+        content=result["content"],
+        created_at=datetime.fromisoformat(result["metadata"]["created_at"]),
+        tags=result["metadata"].get("tags"),
+    )
+
+
 def run():
     """Entry point for running the server."""
     import os

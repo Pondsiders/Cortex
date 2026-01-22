@@ -235,3 +235,22 @@ class Database:
                 memory_id,
             )
             return result == "UPDATE 1"
+
+    async def get_memory(self, memory_id: int) -> dict[str, Any] | None:
+        """Get a single memory by ID. Returns None if not found."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, content, metadata
+                FROM cortex.memories
+                WHERE id = $1 AND NOT forgotten
+                """,
+                memory_id,
+            )
+            if row is None:
+                return None
+            return {
+                "id": row["id"],
+                "content": row["content"],
+                "metadata": json.loads(row["metadata"]),
+            }

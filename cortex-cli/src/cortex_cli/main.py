@@ -202,11 +202,8 @@ def search(
             date_str = dt.format("YYYY-MM-DD")
             console.print(f"[cyan]{score_str}[/cyan] [dim]#{mem['id']}[/dim] ({date_str})")
 
-            # Truncate long content for display
-            content = mem["content"]
-            if len(content) > 200:
-                content = content[:200] + "..."
-            console.print(content)
+            # Full content—no truncation
+            console.print(mem["content"])
             console.print()
 
     except httpx.HTTPStatusError as e:
@@ -300,6 +297,40 @@ def forget(
 
     except httpx.HTTPStatusError as e:
         console.print(f"[red]Error: {e.response.status_code} - {e.response.text}[/red]")
+        raise typer.Exit(1)
+    except httpx.ConnectError:
+        console.print("[red]Error: Could not connect to Cortex server[/red]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def get(
+    memory_id: Annotated[int, typer.Argument(help="Memory ID to retrieve")],
+):
+    """Get a single memory by ID."""
+    client, headers = get_client()
+
+    try:
+        response = client.get(f"/get/{memory_id}", headers=headers)
+        response.raise_for_status()
+        mem = response.json()
+
+        # Parse UTC timestamp and convert to local time
+        dt = pendulum.parse(mem["created_at"]).in_tz(pendulum.local_timezone())
+        date_str = dt.format("YYYY-MM-DD HH:mm")
+        console.print(f"[dim]#{mem['id']}[/dim] ({date_str})")
+
+        if mem.get("tags"):
+            console.print(f"[dim]Tags: {', '.join(mem['tags'])}[/dim]")
+
+        console.print()
+        console.print(mem["content"])
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            console.print(f"[yellow]Memory #{memory_id} not found[/yellow]")
+        else:
+            console.print(f"[red]Error: {e.response.status_code} - {e.response.text}[/red]")
         raise typer.Exit(1)
     except httpx.ConnectError:
         console.print("[red]Error: Could not connect to Cortex server[/red]")
