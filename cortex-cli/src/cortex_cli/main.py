@@ -8,7 +8,15 @@ from typing import Annotated, Optional
 import httpx
 import pendulum
 import typer
+from opentelemetry import trace
+from opentelemetry.propagate import inject
 from rich.console import Console
+
+from pondside.telemetry import init, get_tracer
+
+# Initialize telemetry
+init("cortex-cli")
+tracer = get_tracer()
 
 app = typer.Typer(help="Cortex - Semantic memory CLI")
 console = Console()
@@ -25,10 +33,25 @@ def get_config() -> tuple[str, str]:
 
 
 def get_client() -> tuple[httpx.Client, dict]:
-    """Get HTTP client with headers."""
+    """Get HTTP client with headers.
+
+    Includes:
+    - X-API-Key for auth
+    - X-Session-ID from CLAUDE_SESSION_ID env var (if set)
+    - traceparent for distributed tracing (injected from current span)
+    """
     url, api_key = get_config()
     client = httpx.Client(base_url=url, timeout=30.0)
     headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+
+    # Add session ID if available
+    session_id = os.environ.get("CLAUDE_SESSION_ID")
+    if session_id:
+        headers["X-Session-ID"] = session_id
+
+    # Inject traceparent from current span context
+    inject(headers)
+
     return client, headers
 
 
@@ -64,34 +87,48 @@ def store(
     ] = None,
 ):
     """Store a new memory."""
-    # Read content from stdin if "-" or no argument
-    if content == "-" or (content is None and not sys.stdin.isatty()):
-        content = sys.stdin.read().strip()
+    with tracer.start_as_current_span("cortex.store") as span:
+        # Read content from stdin if "-" or no argument
+        if content == "-" or (content is None and not sys.stdin.isatty()):
+            content = sys.stdin.read().strip()
 
-    if not content:
-        console.print("[red]Error: No content provided[/red]")
-        raise typer.Exit(1)
+        if not content:
+            console.print("[red]Error: No content provided[/red]")
+            raise typer.Exit(1)
 
-    client, headers = get_client()
+        # Log session ID if present
+        session_id = os.environ.get("CLAUDE_SESSION_ID")
+        if session_id:
+            span.set_attribute("session_id", session_id[:8])
 
-    payload = {
-        "content": content,
-        "timezone": get_local_timezone(),
-    }
-    if tags:
-        payload["tags"] = [t.strip() for t in tags.split(",")]
+        span.set_attribute("content_length", len(content))
 
-    try:
-        response = client.post("/store", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        console.print(f"[green]✓ Memory stored[/green] (id: {data['id']})")
-    except httpx.HTTPStatusError as e:
-        console.print(f"[red]Error: {e.response.status_code} - {e.response.text}[/red]")
-        raise typer.Exit(1)
-    except httpx.ConnectError:
-        console.print("[red]Error: Could not connect to Cortex server[/red]")
-        raise typer.Exit(1)
+        # Get client inside span so traceparent injection works
+        client, headers = get_client()
+
+        payload = {
+            "content": content,
+            "timezone": get_local_timezone(),
+        }
+        if tags:
+            payload["tags"] = [t.strip() for t in tags.split(",")]
+
+        try:
+            response = client.post("/store", json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            span.set_attribute("memory_id", data["id"])
+            console.print(f"[green]✓ Memory stored[/green] (id: {data['id']})")
+            # Canary for the Loom to detect successful stores and clear Intro buffers
+            console.print("CORTEX_STORE_SUCCESS_QUACK")
+        except httpx.HTTPStatusError as e:
+            span.record_exception(e)
+            console.print(f"[red]Error: {e.response.status_code} - {e.response.text}[/red]")
+            raise typer.Exit(1)
+        except httpx.ConnectError as e:
+            span.record_exception(e)
+            console.print("[red]Error: Could not connect to Cortex server[/red]")
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -208,8 +245,6 @@ def recent(
             console.print(f"[dim]#{mem['id']}[/dim] ({date_str})")
 
             content = mem["content"]
-            if len(content) > 200:
-                content = content[:200] + "..."
             console.print(content)
             console.print()
 

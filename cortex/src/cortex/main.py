@@ -29,9 +29,8 @@ from .models import (
     VectorsResponse,
 )
 
-# Subvox STM keys
-STM_MESSAGES_KEY = "stm:messages"
-STM_MEMORABLES_KEY = "stm:memorables"
+# Redis pubsub channel for Intro to know when memories are stored
+CORTEX_STORED_CHANNEL = "cortex:stored:{session_id}"
 
 # Global instances
 settings: Settings | None = None
@@ -55,14 +54,14 @@ async def lifespan(app: FastAPI):
     # Initialize embeddings client
     embeddings = EmbeddingClient(settings.ollama_url)
 
-    # Initialize Redis client (optional - for Subvox STM clearing)
+    # Initialize Redis client (for publishing store events to Intro)
     if settings.redis_url:
         try:
             redis_client = redis.from_url(settings.redis_url)
             redis_client.ping()  # Test connection
-            print("[Cortex] Redis connected for Subvox STM")
+            print("[Cortex] Redis connected for Intro notifications")
         except redis.RedisError as e:
-            print(f"[Cortex] Redis connection failed, STM clearing disabled: {e}")
+            print(f"[Cortex] Redis connection failed, Intro notifications disabled: {e}")
             redis_client = None
 
     print(f"[Cortex] Started on port {settings.port}")
@@ -94,7 +93,11 @@ async def verify_api_key(x_api_key: str = Header()):
 
 
 @app.post("/store", response_model=StoreResponse, status_code=status.HTTP_201_CREATED)
-async def store_memory(request: StoreRequest, _: None = Depends(verify_api_key)):
+async def store_memory(
+    request: StoreRequest,
+    _: None = Depends(verify_api_key),
+    x_session_id: str | None = Header(default=None),
+):
     """Store a new memory."""
     try:
         embedding = await embeddings.embed_document(request.content)
@@ -111,13 +114,14 @@ async def store_memory(request: StoreRequest, _: None = Depends(verify_api_key))
         timezone_str=request.timezone,
     )
 
-    # Clear Subvox STM on successful store
-    if redis_client:
+    # Publish to Intro so they can clear their buffers for this session
+    if redis_client and x_session_id:
         try:
-            deleted = redis_client.delete(STM_MESSAGES_KEY, STM_MEMORABLES_KEY)
-            print(f"[Cortex] Subvox STM cleared, keys_deleted={deleted}")
+            channel = CORTEX_STORED_CHANNEL.format(session_id=x_session_id)
+            redis_client.publish(channel, str(memory_id))
+            print(f"[Cortex] Published to {channel}: memory_id={memory_id}")
         except redis.RedisError as e:
-            print(f"[Cortex] Failed to clear Subvox STM: {e}")
+            print(f"[Cortex] Failed to publish store event: {e}")
 
     return StoreResponse(id=memory_id, created_at=created_at)
 
