@@ -7,6 +7,7 @@ Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_RESOURCE_ATTRIBUTES env vars to enable.
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+import httpx
 import redis
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -37,12 +38,13 @@ settings: Settings | None = None
 db: Database | None = None
 embeddings: EmbeddingClient | None = None
 redis_client: redis.Redis | None = None
+http_client: httpx.AsyncClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
-    global settings, db, embeddings, redis_client
+    global settings, db, embeddings, redis_client, http_client
 
     # Load settings
     settings = Settings()
@@ -64,6 +66,11 @@ async def lifespan(app: FastAPI):
             print(f"[Cortex] Redis connection failed, Intro notifications disabled: {e}")
             redis_client = None
 
+    # Initialize HTTP client for Intro API calls
+    if settings.intro_url:
+        http_client = httpx.AsyncClient(base_url=settings.intro_url, timeout=5.0)
+        print(f"[Cortex] Intro client configured: {settings.intro_url}")
+
     print(f"[Cortex] Started on port {settings.port}")
 
     yield
@@ -72,6 +79,8 @@ async def lifespan(app: FastAPI):
     await db.disconnect()
     if redis_client:
         redis_client.close()
+    if http_client:
+        await http_client.aclose()
     print("[Cortex] Stopped")
 
 
@@ -122,6 +131,20 @@ async def store_memory(
             print(f"[Cortex] Published to {channel}: memory_id={memory_id}")
         except redis.RedisError as e:
             print(f"[Cortex] Failed to publish store event: {e}")
+
+    # Tell Intro to clear their memorables for this session
+    if http_client and x_session_id:
+        try:
+            response = await http_client.post(
+                "/session/clear",
+                json={"session_id": x_session_id}
+            )
+            if response.status_code == 204:
+                print(f"[Cortex] Intro cleared for session {x_session_id[:8]}")
+            else:
+                print(f"[Cortex] Intro clear returned {response.status_code}")
+        except httpx.HTTPError as e:
+            print(f"[Cortex] Failed to clear Intro: {e}")
 
     return StoreResponse(id=memory_id, created_at=created_at)
 

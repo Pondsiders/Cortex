@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", alias="CORTEX_HOST")
     port: int = Field(default=7867, alias="CORTEX_PORT")
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
+    intro_url: str | None = Field(default=None, alias="INTRO_URL")
 
     class Config:
         env_file = ".env"
