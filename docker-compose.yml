@@ -31,7 +31,7 @@ services:
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_RESOURCE_ATTRIBUTES=service.name=cortex
       - REDIS_URL=${REDIS_URL}
-      - INTRO_URL=${INTRO_URL:-}
+      - INTRO_URL=${INTRO_URL}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7867/health')"]
       interval: 30s
