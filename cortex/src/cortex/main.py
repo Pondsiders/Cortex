@@ -170,6 +170,8 @@ async def search_memories(request: SearchRequest, _: None = Depends(verify_api_k
         exact=request.exact,
         after=request.after,
         before=request.before,
+        exclude=request.exclude,
+        min_score=request.min_score,
     )
 
     memories = [

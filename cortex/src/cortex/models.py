@@ -42,6 +42,8 @@ class SearchRequest(BaseModel):
     exact: bool = False
     after: datetime | None = None
     before: datetime | None = None
+    exclude: list[int] | None = None  # IDs to skip (already seen this session)
+    min_score: float | None = None  # Minimum similarity threshold (0-1)
 
 
 class VectorsRequest(BaseModel):

@@ -81,11 +81,15 @@ class Database:
         exact: bool = False,
         after: datetime | None = None,
         before: datetime | None = None,
+        exclude: list[int] | None = None,
+        min_score: float | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search memories with hybrid (full-text + semantic) scoring.
 
         If exact=True, only uses full-text search (no embedding needed).
+        exclude: list of memory IDs to skip (e.g., already seen this session)
+        min_score: minimum similarity threshold (0-1), results below this are filtered
         """
         async with self.pool.acquire() as conn:
             # Build the WHERE clause
@@ -95,6 +99,11 @@ class Database:
 
             if not include_forgotten:
                 conditions.append("NOT forgotten")
+
+            if exclude:
+                conditions.append(f"id != ALL(${param_idx}::int[])")
+                params.append(exclude)
+                param_idx += 1
 
             if after:
                 conditions.append(f"(metadata->>'created_at')::timestamptz >= ${param_idx}")
@@ -126,6 +135,12 @@ class Database:
             else:
                 # Hybrid search: 50% full-text + 50% semantic
                 embedding_json = json.dumps(query_embedding)
+
+                # Build WHERE clause for min_score threshold (must recompute score expression)
+                min_score_clause = ""
+                if min_score is not None:
+                    min_score_clause = f"WHERE (0.5 * LEAST(fts_score, 1.0) + 0.5 * sem_score) >= ${param_idx + 3}"
+
                 query = f"""
                     WITH scored AS (
                         SELECT
@@ -149,10 +164,13 @@ class Database:
                         metadata,
                         (0.5 * LEAST(fts_score, 1.0) + 0.5 * sem_score) as score
                     FROM scored
+                    {min_score_clause}
                     ORDER BY score DESC
                     LIMIT ${param_idx + 2}
                 """
                 params.extend([query_text, embedding_json, limit])
+                if min_score is not None:
+                    params.append(min_score)
 
             rows = await conn.fetch(query, *params)
 
