@@ -133,13 +133,16 @@ class Database:
                 """
                 params.extend([query_text, limit])
             else:
-                # Hybrid search: 50% full-text + 50% semantic
+                # Three-way search: exact match + full-text + semantic
+                # Exact match: if query appears literally in content, score 1.0
+                # Full-text: ts_rank for linguistic similarity
+                # Semantic: embedding cosine similarity
                 embedding_json = json.dumps(query_embedding)
 
-                # Build WHERE clause for min_score threshold (must recompute score expression)
+                # Build WHERE clause for min_score threshold
                 min_score_clause = ""
                 if min_score is not None:
-                    min_score_clause = f"WHERE (0.5 * LEAST(fts_score, 1.0) + 0.5 * sem_score) >= ${param_idx + 3}"
+                    min_score_clause = f"AND GREATEST(exact_score, 0.5 * LEAST(fts_score, 1.0) + 0.5 * sem_score) >= ${param_idx + 3}"
 
                 query = f"""
                     WITH scored AS (
@@ -147,7 +150,10 @@ class Database:
                             id,
                             content,
                             metadata,
-                            -- Normalize full-text score to 0-1 range
+                            -- Exact match: 1.0 if query appears with word boundaries
+                            CASE WHEN content ~* ('\\m' || ${param_idx} || '\\M')
+                                 THEN 1.0 ELSE 0.0 END as exact_score,
+                            -- Full-text ranking (ts_rank returns 0-1ish)
                             COALESCE(
                                 ts_rank(content_tsv, plainto_tsquery('english', ${param_idx})),
                                 0
@@ -162,8 +168,9 @@ class Database:
                         id,
                         content,
                         metadata,
-                        (0.5 * LEAST(fts_score, 1.0) + 0.5 * sem_score) as score
+                        GREATEST(exact_score, 0.5 * LEAST(fts_score, 1.0) + 0.5 * sem_score) as score
                     FROM scored
+                    WHERE 1=1
                     {min_score_clause}
                     ORDER BY score DESC
                     LIMIT ${param_idx + 2}
