@@ -20,9 +20,6 @@ services:
     restart: unless-stopped
     ports:
       - "7867:7867"
-    dns:
-      - ${TAILSCALE_DNS:-100.100.100.100}
-      - 1.1.1.1  # Fallback for non-Tailscale hostnames
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - OLLAMA_URL=${OLLAMA_URL}
@@ -38,3 +35,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    dns:
+      - ${TAILSCALE_DNS}
+      - ${PUBLIC_DNS}
+    dns_search:
+      - ${TAILSCALE_SEARCH}
